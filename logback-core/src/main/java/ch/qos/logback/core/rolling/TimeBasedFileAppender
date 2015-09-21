@@ -1,0 +1,208 @@
+/**
+ * Timed File Appender that will rollover daily based
+ * on provided time. The time is in 24-Hour format.
+ * 
+ * Variation of RollingFileAppender, which relies on
+ * timing thread independent of logback rollover check
+ * mechanism to trigger a rollover.  A work around the
+ * problem of normal Rollovers being checked only after
+ * an append event.
+ * 
+ * Timer is based on internal thread that uses an object 
+ * of TriggerTime to calculate time when to trigger a
+ * rollover.  It will call 'Thread.Sleep' for that time,
+ * and conduct rollover once returns.
+ * 
+ * TriggerTime tag needs to be included in the setup file
+ *  or initiated.  Example: <triggerTime>0930</triggerTime>
+ *  
+ */
+
+
+package ch.qos.logback.core.rolling;
+
+import ch.qos.logback.core.FileAppender;
+import ch.qos.logback.core.rolling.RollingPolicy;
+import ch.qos.logback.core.rolling.RolloverFailure;
+import ch.qos.logback.core.rolling.TriggerTime;
+import ch.qos.logback.core.rolling.helper.CompressionMode;
+
+import java.io.File;
+import java.io.IOException;
+
+
+public class TimeBasedFileAppender<E> extends FileAppender<E> {
+	File currentlyActiveFile;
+    TriggerTime triggerTime;
+    RollingPolicy rollingPolicy;
+    
+	private Timer timer;
+	private Thread timerThread;
+   
+
+
+    private class Timer implements Runnable{
+        public boolean runCondition = true;
+        public void run() {
+            addInfo("Thread Starting.");
+            while(runCondition){
+                long nextTimedTrigger = triggerTime.getExpectedFutureTriggerTime(),
+                        sleepTime = nextTimedTrigger - System.currentTimeMillis();
+
+                addInfo("Timer is setting up, next trigger time to be: " + nextTimedTrigger + "."
+                        + "  Sleep Time: " + sleepTime);
+
+                try {
+                    Thread.sleep(sleepTime); //sleep until thread returns or interrupted
+                    synchronized (triggerTime) {
+                        addInfo("Rollover initiated.");
+                        rollover();
+                    }
+                } catch(InterruptedException e){
+                    runCondition = false;
+                    addInfo("Sleep time interrupted, next rollover skipped.");
+                }
+            }
+        }
+    }
+
+    
+    
+
+    @Override
+    public void start(){
+        if(triggerTime == null){
+            addError("Trigger Time is not initialized.");
+            throw new IllegalStateException("The TriggerTime option must be set.");
+        }
+
+        // we don't want to void existing log files
+        if (!append) {
+            addWarn("Append mode is mandatory for RollingFileAppender");
+            append = true;
+        }
+
+        if (rollingPolicy == null) {
+            addError("No RollingPolicy was set for the SimpleFileAppender named "
+                    + getName());
+            return;
+        }
+
+        if (isPrudent()) {
+            if (rawFileProperty() != null) {
+                addWarn("Setting \"File\" property to null on account of prudent mode");
+                setFile(null);
+            }
+            if (rollingPolicy.getCompressionMode() != CompressionMode.NONE) {
+                addError("Compression is not supported in prudent mode. Aborting");
+                return;
+            }
+        }
+
+        triggerTime.setContext(context); //set trigger time context to current context
+        currentlyActiveFile = new File(getFile()); //gets Active file 
+        
+        timer = new Timer(); //initialize the timer object
+        
+        timerThread = new Thread(timer); //setup and start the timer thread
+        timerThread.setDaemon(true);
+        timerThread.start();
+
+        addInfo("Active log file name: " + getFile());
+        addInfo("Trigger Timer: " + triggerTime.toString());
+
+        super.start();
+    }
+
+    @Override
+    public void stop() {
+        if (rollingPolicy != null) rollingPolicy.stop();
+
+        triggerTime.notifyAll(); //notify all holding triggerTime
+        synchronized (triggerTime){
+        	addInfo("Stop called, TimeBasedFileAppender is stopping.");
+            timerThread.interrupt();
+        }
+
+        super.stop();
+    }
+
+    @Override
+    public void setFile(String file) {
+        // http://jira.qos.ch/browse/LBCORE-94
+        // allow setting the file name to null if mandated by prudent mode
+        if (file != null && ((rollingPolicy != null))) {
+            addError("File property must be set before setting rollingPolicy property.");
+        }
+        super.setFile(file);
+    }
+
+    @Override
+    public String getFile() {
+        return rollingPolicy.getActiveFileName();
+    }
+    
+    public void rollover() {
+    	addInfo("Rollover happening!");
+    	synchronized (lock) {
+        
+            // Note: This method needs to be synchronized because it needs exclusive
+            // access while it closes and then re-opens the target file.
+            //
+            // make sure to close the hereto active log file! Renaming under windows
+            // does not work for open files.
+            this.closeOutputStream();
+            attemptRollover();
+            attemptOpenFile();
+        } 
+    }
+
+    private void attemptOpenFile() {
+        try {
+            // update the currentlyActiveFile LOGBACK-64
+            currentlyActiveFile = new File(rollingPolicy.getActiveFileName());
+
+            // This will also close the file. This is OK since multiple close operations are safe.
+            this.openFile(rollingPolicy.getActiveFileName());
+        } catch (IOException e) {
+            addError("setFile(" + fileName + ", false) call failed.", e);
+        }
+    }
+
+    private void attemptRollover() {
+        try {
+            rollingPolicy.rollover();
+        } catch (RolloverFailure rf) {
+            addWarn("RolloverFailure occurred. Deferring roll-over.");
+            // we failed to roll-over, let us not truncate and risk data loss
+            this.append = true;
+        }
+    }
+
+    @Override
+    protected void subAppend(E event) {
+        // The roll-over check must precede actual writing. This is the
+        // only correct behavior for time driven triggers.
+
+        // We need to synchronize on triggeringPolicy so that only one rollover
+        // occurs at a time
+
+        synchronized (triggerTime) {
+            //if triggerTime is checking for rollover possibility hold appends
+        }
+
+        super.subAppend(event);
+    }
+
+    public RollingPolicy getRollingPolicy() {
+        return rollingPolicy;
+    }
+
+    public void setRollingPolicy(RollingPolicy policy) {
+        rollingPolicy = policy;
+    }
+
+    public void setTriggerTime(TriggerTime tt){
+        triggerTime = tt;
+    }
+}
