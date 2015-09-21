@@ -1,0 +1,168 @@
+/**
+ * A Time definition for use as a timer based trigger.
+ * 
+ * Time is in 24-Hour Format
+ *
+ * It provides future trigger calculations, and a test
+ * service if the trigger time has been reached.
+ *
+ * Used by TimeBasedFileAppender to manage time calculations
+ * and trigger timing.
+ */
+
+package ch.qos.logback.core.rolling;
+
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.GregorianCalendar;
+import java.util.Locale;
+import java.util.TimeZone;
+
+import ch.qos.logback.core.Context;
+import ch.qos.logback.core.spi.ContextAwareBase;
+
+
+public class TriggerTime extends ContextAwareBase {
+	private TimeZone tz;
+	private static String triggerTime;
+	private Calendar calendar;
+	private boolean hasRunOnce = false;
+	private int hour, min;
+
+	public TriggerTime(String args) {
+		this(args, null);
+	}
+
+	public TriggerTime(String patternArg, Context contextArg) {
+		setContext(contextArg);
+		triggerTime = patternArg;
+		addInfo("TriggerTime initiating with " + triggerTime);
+		initiate();
+	}
+
+	static public TriggerTime valueOf(String triggerTime) {
+		return new TriggerTime(triggerTime);
+	}
+
+	private void initiate() {
+		TimeZone zone = TimeZone.getDefault();//Locale.getDefault());//Calendar.getInstance().getTimeZone().getDisplayName();
+		if (triggerTime == null) {
+			addWarn("Tried to initiate TriggerTime but passed triggerTime was invalid. Default: System Timezone with rollover at 0000.");
+		} else {
+			String[] strs = triggerTime.split("\\|");
+			if (strs.length > 0) {
+				if (strs[0].length() > 3) {
+					try {
+						hour = Integer.parseInt(strs[0].substring(0, 2));
+						min = Integer.parseInt(strs[0].substring(2, 4));
+						zone = TimeZone.getTimeZone(strs[1]);
+					} catch (NumberFormatException e) {
+						hour = 0;
+						min = 0;
+						addWarn("Tried to parse invalid time in TriggerTime string, reverting to Default: System Timezone with rollover at 0000.");
+					} catch (ArrayIndexOutOfBoundsException e) {
+						addWarn("Missing Zone entity: defaulting to GMT.");
+					}
+				}
+			}
+		}
+
+		tz = zone;
+		calendar = new GregorianCalendar(tz);
+		calendar.set(Calendar.HOUR_OF_DAY, hour);
+		calendar.set(Calendar.MINUTE, min);
+		addInfo("TriggerTime set to " + hour + ":" + min + " @ "
+				+ tz.getDisplayName() + " [Epoch time: " + calendar.getTimeInMillis() + "]");
+	}
+	
+	public String toString() {
+		if(calendar == null)
+			return "0000|Err";
+			
+		SimpleDateFormat sdf = new SimpleDateFormat("dd-MM-yyyy HH:mm z");
+		return sdf.format(calendar.getTime());
+	}
+
+	/**
+	 * Returns true if the incoming time matches the 
+	 * set trigger timer.  Additionally, it provides a 
+	 * locking mechanism to ensure that only one trigger 
+	 * occurs, when polled multiple time in succession. 
+	 * 
+	 * The accuracy of the timer is within 60 seconds.
+	 * 
+	 * Locks the trigger for 120 seconds once it is 
+	 * triggered.
+	 * 
+	 * @param time Time to test against set trigger time.
+	 * @return True if trigger is achieved, false otherwise.
+	 */
+	public boolean isTimeToTrigger(long time) {
+		boolean bool = false;
+
+		if (!hasRunOnce) {
+			Calendar cal = new GregorianCalendar(tz);
+			int currHour = cal.get(Calendar.HOUR_OF_DAY), 
+					currMins = cal.get(Calendar.MINUTE), 
+					triggerHour = hour, 
+					triggerMins = min;//calendar.get(Calendar.MINUTE);
+			if (currHour == triggerHour && currMins == triggerMins) {
+				hasRunOnce = true;
+				bool = true;
+				Thread t = new Thread() {
+					public void run() {
+						try {
+							Thread.sleep(120000L);
+						} catch (InterruptedException e) {
+							e.printStackTrace();
+						};
+						hasRunOnce = false;
+					}
+				};
+
+				t.start();
+			}
+		}
+
+		return bool;
+	}
+	
+	/**
+	 * Calculates a future trigger time in epoch from current
+	 * system time.  
+	 * 
+	 * @return Long epoch time of when the next trigger should occur.
+	 */
+	public long getExpectedFutureTriggerTime(){
+		long trigger, curr = System.currentTimeMillis();
+		
+		
+		Calendar cal = Calendar.getInstance(tz);
+		trigger = getTime(cal);
+		
+		addInfo("Time Zone: " + tz.getDisplayName() +". Calculating Trigger Time, current time: " + curr + ". Calculated time: " + trigger);
+		if(trigger <= curr){
+			//trigger calculations yielded past time advance the calendar forward and recalculate
+			addInfo("Calcuated Time is in the past, advancing by a day.");
+			cal.add(Calendar.DATE, 1);
+			trigger = getTime(cal);
+		}
+		
+		
+		return trigger;
+	}
+
+	/**
+	 * Internal method to take provided calendar and get epoch time based on
+	 * set Hour and Min.  
+	 * 
+	 * @param cal Calendar instance set with proper time zone. (Object morphed)
+	 * @return Epoch time based on calendar instance and trigger hour/min.
+	 */
+	private long getTime(Calendar cal){
+		cal.set(Calendar.HOUR_OF_DAY, hour);
+		cal.set(Calendar.MINUTE, min);
+		
+		return cal.getTimeInMillis();
+	}
+}
